@@ -2,19 +2,29 @@
   "schemaVersion": 1,
   "id": "projectmushroom.gravedecay",
   "name": "Gravedecay",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Project Mushroom",
   "license": "MIT",
-  "description": "Tailnet Gravedecay appliance summary.",
+  "description": "Theme-native fleet health for Gravedecay appliances on your tailnet.",
   "kinds": ["bar-widget"],
   "entryPoints": {"barWidget": "Panel.qml"},
   "barWidget": {
     "displayName": "Gravedecay",
-    "description": "Discover and show Gravedecay appliances on this tailnet.",
+    "description": "Discover Gravedecay appliances, watch their health, and open their dashboards.",
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right",
-    "defaults": {"refreshIntervalSec": 45},
-    "schema": [{"key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 30, "max": 60, "step": 5, "defaultValue": 45}]
+    "defaults": {
+      "refreshIntervalSec": 45,
+      "historySamples": 60,
+      "desktopEntry": "gravedecay.desktop",
+      "notificationsEnabled": false
+    },
+    "schema": [
+      {"key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 30, "max": 300, "step": 5, "defaultValue": 45},
+      {"key": "historySamples", "type": "integer", "label": "In-memory history samples", "min": 12, "max": 120, "step": 12, "defaultValue": 60},
+      {"key": "desktopEntry", "type": "string", "label": "Dashboard desktop entry", "defaultValue": "gravedecay.desktop", "description": "Installed PWA desktop entry. Leave empty to always use the browser."},
+      {"key": "notificationsEnabled", "type": "boolean", "label": "Health change notifications", "defaultValue": false}
+    ]
   }
 }
