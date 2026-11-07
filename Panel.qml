@@ -689,7 +689,8 @@ Panel {
     open: root.opened
     focusTarget: root.chatOpen ? chatInput : keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(660))
+    // Grow with the content up to the room below the bar, then scroll.
+    contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher

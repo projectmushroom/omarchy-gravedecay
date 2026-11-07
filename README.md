@@ -119,7 +119,8 @@ default.
 ## Use
 
 Left-click the skull to open or close the panel. Right- or middle-click refreshes
-discovery.
+discovery. The panel grows with its content down to the bottom of the screen,
+and scrolls only when that is not enough.
 
 | Key | Action |
 | --- | --- |
