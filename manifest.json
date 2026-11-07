@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "projectmushroom.gravedecay",
   "name": "Gravedecay",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "author": "Project Mushroom",
   "license": "MIT",
   "description": "Theme-native fleet health, T3 activity, Keeper and Digger chat, and updates for Gravedecay appliances.",
