@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "id": "projectmushroom.gravedecay",
   "name": "Gravedecay",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "author": "Project Mushroom",
   "license": "MIT",
-  "description": "Theme-native fleet health and T3 chat activity for Gravedecay appliances.",
+  "description": "Theme-native fleet health, T3 activity, Keeper and Digger chat, and updates for Gravedecay appliances.",
   "kinds": ["bar-widget"],
   "entryPoints": {"barWidget": "Panel.qml"},
   "barWidget": {
     "displayName": "Gravedecay",
-    "description": "Discover Gravedecay appliances, watch health and T3 chats, and open their tools.",
+    "description": "Discover Gravedecay appliances, watch health and T3 chats, talk to the Keeper and diggers, and update graves and the plugin.",
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -18,13 +18,15 @@
       "refreshIntervalSec": 45,
       "historySamples": 60,
       "desktopEntry": "gravedecay.desktop",
-      "notificationsEnabled": false
+      "notificationsEnabled": false,
+      "updateChecks": true
     },
     "schema": [
       {"key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 30, "max": 300, "step": 5, "defaultValue": 45},
       {"key": "historySamples", "type": "integer", "label": "In-memory history samples", "min": 12, "max": 120, "step": 12, "defaultValue": 60},
       {"key": "desktopEntry", "type": "string", "label": "Dashboard desktop entry", "defaultValue": "gravedecay.desktop", "description": "Installed PWA desktop entry. Leave empty to always use the browser."},
-      {"key": "notificationsEnabled", "type": "boolean", "label": "Health change notifications", "defaultValue": false}
+      {"key": "notificationsEnabled", "type": "boolean", "label": "Health change notifications", "defaultValue": false},
+      {"key": "updateChecks", "type": "boolean", "label": "Check for plugin updates", "defaultValue": true, "description": "Fetch this plugin's git origin every six hours to offer updates. Grave release checks are unaffected."}
     ]
   }
 }

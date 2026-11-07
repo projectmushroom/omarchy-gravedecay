@@ -1,0 +1,183 @@
+#!/bin/bash
+# Gravedecay plugin transport.
+#
+# Every request the panel makes to a grave goes through this script, so the
+# tailnet-only rules live in one place:
+#   - the host must be an online node in `tailscale status` with a *.ts.net name;
+#   - the connection is pinned to that node's Tailscale 100.64.0.0/10 address,
+#     so DNS can never steer a request off the tailnet;
+#   - HTTPS only, no redirects, no proxies, no ~/.curlrc, bounded time and size;
+#   - management routes are a fixed allowlist, and POST bodies arrive on stdin
+#     (never argv), one JSON object per line.
+# Owner authorization is the grave's own Tailscale identity check: this script
+# sends no token, cookie or identity header.
+#
+#   gravedecay-api probe <dns>                 summary, T3, capabilities, diggers, keeper
+#   gravedecay-api releases <dns>              release choices and updater status
+#   gravedecay-api request <GET|POST> <dns> <route>
+#   gravedecay-api self-check                  is a newer plugin on origin?
+#   gravedecay-api self-update                 review and apply it in a terminal
+
+set -uo pipefail
+export LC_ALL=C
+
+PLUGIN_ID=projectmushroom.gravedecay
+PLUGIN_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+ID='[0-9]{10}-[0-9a-f]{32}'
+DIGGER='[a-z][a-z0-9-]{1,19}'
+
+die() {
+  printf 'gravedecay-api: %s\n' "$*" >&2
+  exit 2
+}
+
+valid_dns() {
+  [[ ${#1} -le 253 && $1 =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+ts\.net$ ]]
+}
+
+# The node's Tailscale IPv4 address, only if it is online on this tailnet now.
+tailnet_ip() {
+  local ip
+  ip=$(tailscale status --json 2>/dev/null | jq -r --arg dns "$1." '
+    ([.Self] + [(.Peer // {})[]])
+    | map(select(type == "object" and ((.DNSName // "") | ascii_downcase) == $dns and .Online == true))
+    | (.[0].TailscaleIPs // [])[]' 2>/dev/null | grep -m1 -E '^100\.')
+  [[ $ip =~ ^100\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  ((BASH_REMATCH[1] >= 64 && BASH_REMATCH[1] <= 127 && BASH_REMATCH[2] <= 255 && BASH_REMATCH[3] <= 255)) || return 1
+  printf '%s' "$ip"
+}
+
+# fetch <method> <path> <max-bytes> <max-seconds> <out> [body-file]; prints the HTTP status.
+fetch() {
+  local method=$1 path=$2 max=$3 seconds=$4 out=$5 body=${6:-} code
+  local args=(-q --silent --proto =https --proto-redir =https --max-redirs 0 --noproxy '*'
+    --connect-timeout 3 --max-time "$seconds" --max-filesize "$max"
+    --resolve "$DNS:443:$IP" -H 'X-Grave-Client: 1' -H 'Accept: application/json'
+    -o "$out" -w '%{http_code}' -X "$method")
+  [[ -n $body ]] && args+=(-H 'Content-Type: application/json' --data-binary "@$body")
+  # A failed, truncated or oversized transfer is never handed to the panel.
+  code=$(curl "${args[@]}" "https://$DNS$path" 2>/dev/null) || code=000
+  [[ $code =~ ^[0-9]{3}$ && $code != 000 ]] || { code=000; : >"$out"; }
+  (($(stat -c %s "$out" 2>/dev/null || echo 0) <= max)) || { code=000; : >"$out"; }
+  printf '%s' "$code"
+}
+
+target() {
+  DNS=${1,,}
+  valid_dns "$DNS" || die "not a tailnet name"
+  IP=$(tailnet_ip "$DNS") || return 1
+  TMP=$(mktemp -d) || die "no temp dir"
+  trap 'rm -rf "$TMP"' EXIT
+}
+
+has_route() { # <capabilities file> <GET|POST> <route>
+  jq -e --arg m "$2" --arg r "$3" '(.routes[$m] // []) | index($r) != null' "$1" >/dev/null 2>&1
+}
+
+cmd_probe() {
+  target "${1:-}" || { printf '{"reachable":false}\n'; return 0; }
+  local s t c d k sc tc cc dc=0 kc=0
+  : >"$TMP/t" >"$TMP/c" >"$TMP/d" >"$TMP/k"
+  sc=$(fetch GET /grave/api/v1/summary 65536 4 "$TMP/s")
+  if [[ $sc == 200 ]] && jq -e '.product == "gravedecay" and .api_version == 1' "$TMP/s" >/dev/null 2>&1; then
+    fetch GET /grave/api/t3-activity 131072 4 "$TMP/t" >"$TMP/tc" &
+    fetch GET /grave/api/v1/capabilities 65536 4 "$TMP/c" >"$TMP/cc" &
+    wait
+    tc=$(<"$TMP/tc") cc=$(<"$TMP/cc")
+    if [[ $cc == 200 ]]; then
+      has_route "$TMP/c" GET diggers && { fetch GET /grave/api/v1/diggers 262144 5 "$TMP/d" >"$TMP/dc" & }
+      has_route "$TMP/c" GET keeper && { fetch GET /grave/api/v1/keeper 262144 5 "$TMP/k" >"$TMP/kc" & }
+      wait
+      [[ -s $TMP/dc ]] && dc=$(<"$TMP/dc")
+      [[ -s $TMP/kc ]] && kc=$(<"$TMP/kc")
+    fi
+  fi
+  jq -nc --rawfile s "$TMP/s" --rawfile t "$TMP/t" --rawfile c "$TMP/c" --rawfile d "$TMP/d" --rawfile k "$TMP/k" \
+    --arg sc "$sc" --arg tc "${tc:-0}" --arg cc "${cc:-0}" --arg dc "$dc" --arg kc "$kc" \
+    '{reachable: ($sc == "200"),
+      summary: (if $sc == "200" then $s else "" end),
+      t3: (if $tc == "200" then $t else "" end),
+      capabilities: (if $cc == "200" then $c else "" end),
+      diggers: (if $dc == "200" then $d else "" end),
+      keeper: (if $kc == "200" then $k else "" end)}'
+}
+
+cmd_releases() {
+  target "${1:-}" || { printf '{"reachable":false}\n'; return 0; }
+  local rc uc
+  # Linux graves resolve releases with git on the grave; give them time.
+  fetch GET /grave/api/v1/admin/releases 65536 40 "$TMP/r" >"$TMP/rc" &
+  fetch GET /grave/api/v1/admin/update-status 65536 10 "$TMP/u" >"$TMP/uc" &
+  wait
+  rc=$(<"$TMP/rc") uc=$(<"$TMP/uc")
+  jq -nc --rawfile r "$TMP/r" --rawfile u "$TMP/u" --arg rc "$rc" --arg uc "$uc" \
+    '{reachable: true, releases: (if $rc == "200" then $r else "" end), status: (if $uc == "200" then $u else "" end)}'
+}
+
+allowed_route() { # <method> <route>
+  case $1 in
+  GET)
+    [[ $2 =~ ^(capabilities|admin/releases|admin/update-status|keeper|diggers)$ ]] ||
+      [[ $2 =~ ^keeper\?id=$ID\&after=[0-9]{1,10}$ ]] ||
+      [[ $2 =~ ^diggers\?name=$DIGGER$ ]] ||
+      [[ $2 =~ ^diggers/conversation\?name=$DIGGER\&id=$ID\&after=[0-9]{1,10}$ ]]
+    ;;
+  POST)
+    [[ $2 =~ ^(admin/upgrade|keeper|keeper/turn|keeper/cancel|diggers/ask|diggers/cancel|diggers/finish|diggers/resume)$ ]]
+    ;;
+  *) return 1 ;;
+  esac
+}
+
+cmd_request() {
+  local method=${1:-} dns=${2:-} route=${3:-} body="" code
+  allowed_route "$method" "$route" || die "route not allowed"
+  if [[ $method == POST ]]; then
+    IFS= read -r -t 10 body || [[ -n $body ]] || die "no request body"
+    ((${#body} <= 65536)) || die "request body too large"
+    jq -e 'type == "object"' <<<"$body" >/dev/null 2>&1 || die "request body must be a JSON object"
+  fi
+  target "$dns" || { printf '\nHTTP 000\n'; return 0; }
+  if [[ $method == POST ]]; then
+    printf '%s' "$body" >"$TMP/b"
+    # Keeper and digger POSTs answer with the whole conversation record (up to 256 KiB).
+    code=$(fetch POST "/grave/api/v1/$route" 524288 20 "$TMP/o" "$TMP/b")
+  else
+    code=$(fetch GET "/grave/api/v1/$route" 524288 20 "$TMP/o")
+  fi
+  cat "$TMP/o"
+  printf '\nHTTP %s\n' "$code"
+}
+
+cmd_self_check() {
+  local version remote="" behind=0 dirty=false error=""
+  version=$(jq -r '.version // ""' "$PLUGIN_DIR/manifest.json" 2>/dev/null)
+  if [[ ! -d $PLUGIN_DIR/.git ]]; then
+    jq -nc --arg v "$version" '{git: false, local: $v}'
+    return 0
+  fi
+  export GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="ssh -oBatchMode=yes"
+  if timeout 30 git -C "$PLUGIN_DIR" fetch --quiet origin HEAD 2>/dev/null; then
+    remote=$(git -C "$PLUGIN_DIR" show FETCH_HEAD:manifest.json 2>/dev/null | jq -r '.version // ""' 2>/dev/null)
+    behind=$(git -C "$PLUGIN_DIR" rev-list --count HEAD..FETCH_HEAD 2>/dev/null || echo 0)
+  else
+    error="fetch failed"
+  fi
+  [[ -z $(git -C "$PLUGIN_DIR" status --porcelain 2>/dev/null) ]] || dirty=true
+  jq -nc --arg v "$version" --arg r "$remote" --arg b "$behind" --argjson d "$dirty" --arg e "$error" \
+    '{git: true, local: $v, remote: $r, behind: ($b | tonumber? // 0), dirty: $d, error: $e}'
+}
+
+cmd_self_update() {
+  # The update shows the incoming diff and asks before applying it.
+  exec omarchy-launch-floating-terminal-with-presentation "omarchy plugin update $PLUGIN_ID"
+}
+
+case ${1:-} in
+probe) shift; cmd_probe "$@" ;;
+releases) shift; cmd_releases "$@" ;;
+request) shift; cmd_request "$@" ;;
+self-check) cmd_self_check ;;
+self-update) cmd_self_update ;;
+*) die "usage: gravedecay-api probe|releases|request|self-check|self-update" ;;
+esac
