@@ -19,6 +19,7 @@ Panel {
   property var pending: []
   property var discovered: []
   property var probing: null
+  property var probingSummary: null
   property bool completedInitialScan: false
   property double nowMs: Date.now()
   property int phraseIndex: 0
@@ -37,14 +38,19 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property var current: findNode(selectedId) || (nodes.length ? nodes[0] : null)
   readonly property string currentState: Model.state(current)
+  readonly property var currentT3Counts: Model.t3Counts(current ? current.t3Activity : null)
+  readonly property bool currentT3Available: Model.t3Available(current ? current.t3Activity : null)
   readonly property int reachableCount: countWhere(function(node) { return node.reachable !== false })
   readonly property int warningCount: countWhere(function(node) { var s = Model.state(node); return s === "warning" || s === "unreachable" })
+  readonly property int fleetT3Feeds: countWhere(function(node) { return Model.t3Available(node.t3Activity) })
+  readonly property int fleetT3Working: t3Total("working")
+  readonly property int fleetT3Attention: t3Total("attention")
   readonly property string phrase: {
     if (!current) return refreshing ? "Knocking on crypts" : "No graves found on this tailnet"
     var phrases = Model.phraseBucket(current)
     return phrases[phraseIndex % phrases.length]
   }
-  readonly property color stateColor: currentState === "warning" ? urgent : currentState === "unreachable" ? dim : foreground
+  readonly property color stateColor: currentT3Counts.attention > 0 || currentState === "warning" ? urgent : currentState === "unreachable" ? dim : foreground
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -57,6 +63,11 @@ Panel {
     var count = 0
     for (var i = 0; i < nodes.length; i++) if (predicate(nodes[i])) count++
     return count
+  }
+  function t3Total(name) {
+    var total = 0
+    for (var i = 0; i < nodes.length; i++) total += Number(Model.t3Counts(nodes[i].t3Activity)[name] || 0)
+    return total
   }
   function nodeIndex(node) {
     if (!node) return 0
@@ -95,13 +106,25 @@ Panel {
   function probeNext() {
     if (!pending.length) { finishDiscovery(); return }
     probing = pending.shift()
+    probingSummary = null
     curl.command = ["curl", "--silent", "--show-error", "--fail", "--connect-timeout", "2", "--max-time", "3", "--max-filesize", "65536", "https://" + probing.dns + "/grave/api/v1/summary"]
     curl.running = true
   }
-  function recordProbe(value) {
+  function recordSummaryProbe(value) {
     var old = previousNode(probing.id)
-    if (value) discovered.push({ id: probing.id, dns: probing.dns, name: probing.name, reachable: true, lastSeen: Date.now(), summary: value, history: appendHistory(old, value) })
-    else if (old) discovered.push({ id: old.id, dns: old.dns, name: old.name, reachable: false, lastSeen: old.lastSeen, summary: old.summary, history: old.history || [] })
+    if (!value) {
+      if (old) discovered.push({ id: old.id, dns: old.dns, name: old.name, reachable: false, lastSeen: old.lastSeen, summary: old.summary, t3Activity: old.t3Activity || null, history: old.history || [] })
+      return false
+    }
+    probingSummary = value
+    activityCurl.command = ["curl", "--silent", "--show-error", "--fail", "--connect-timeout", "2", "--max-time", "3", "--max-filesize", "131072", "https://" + probing.dns + "/grave/api/t3-activity"]
+    activityCurl.running = true
+    return true
+  }
+  function recordActivityProbe(value) {
+    var old = previousNode(probing.id)
+    discovered.push({ id: probing.id, dns: probing.dns, name: probing.name, reachable: true, lastSeen: Date.now(), summary: probingSummary, t3Activity: value, history: appendHistory(old, probingSummary) })
+    probingSummary = null
   }
   function containsDiscovered(id) {
     for (var i = 0; i < discovered.length; i++) if (discovered[i].id === id) return true
@@ -109,7 +132,17 @@ Panel {
   }
   function maybeNotify(oldNode, nextNode) {
     if (!completedInitialScan || !notificationsEnabled || !oldNode || notify.running) return
-    var before = Model.state(oldNode), after = Model.state(nextNode)
+    var beforeT3 = Model.t3Counts(oldNode.t3Activity), afterT3 = Model.t3Counts(nextNode.t3Activity)
+    if (afterT3.attention > beforeT3.attention) {
+      var attention = afterT3.attention
+      notify.command = ["notify-send", "--app-name=Gravedecay", "Gravedecay · " + nextNode.name, attention + " T3 chat" + (attention === 1 ? " needs" : "s need") + " you"]
+      notify.running = true
+      return
+    }
+    var beforeStateNode = oldNode
+    if (Model.t3Available(oldNode.t3Activity) && !Model.t3Available(nextNode.t3Activity))
+      beforeStateNode = { reachable: oldNode.reachable, summary: oldNode.summary, t3Activity: null }
+    var before = Model.state(beforeStateNode), after = Model.state(nextNode)
     if (before === after) return
     var body = after === "healthy" ? "Buried, not broken — the grave recovered"
       : after === "active" ? "Agents started the graveyard shift"
@@ -122,7 +155,7 @@ Panel {
   function finishDiscovery() {
     for (var i = 0; i < nodes.length; i++) {
       var old = nodes[i]
-      if (!containsDiscovered(old.id)) discovered.push({ id: old.id, dns: old.dns, name: old.name, reachable: false, lastSeen: old.lastSeen, summary: old.summary, history: old.history || [] })
+      if (!containsDiscovered(old.id)) discovered.push({ id: old.id, dns: old.dns, name: old.name, reachable: false, lastSeen: old.lastSeen, summary: old.summary, t3Activity: old.t3Activity || null, history: old.history || [] })
     }
     discovered.sort(function(a, b) { if (a.reachable !== b.reachable) return a.reachable ? -1 : 1; return String(a.name).localeCompare(String(b.name)) })
     for (var j = 0; j < discovered.length; j++) maybeNotify(previousNode(discovered[j].id), discovered[j])
@@ -149,6 +182,12 @@ Panel {
     return current && path ? "https://" + current.dns + path : ""
   }
   function openLink(name) { var url = linkUrl(name); if (url) Qt.openUrlExternally(url) }
+  function actionableT3Threads() { return Model.actionableT3Threads(current ? current.t3Activity : null, 5) }
+  function openT3Thread(thread) {
+    var url = current ? Model.activityUrl(current.dns, thread && thread.link) : ""
+    if (url) Qt.openUrlExternally(url)
+  }
+  function hasPassageways() { return linkUrl("dashboard") !== "" || linkUrl("t3") !== "" || linkUrl("terminal") !== "" || linkUrl("network") !== "" }
   function openDashboard() {
     var url = linkUrl("dashboard")
     if (!url) return
@@ -193,7 +232,12 @@ Panel {
   Process {
     id: curl
     stdout: StdioCollector { id: curlOut; waitForEnd: true }
-    onExited: function(code) { root.recordProbe(code === 0 ? Model.summary(String(curlOut.text || "")) : null); root.probeNext() }
+    onExited: function(code) { if (!root.recordSummaryProbe(code === 0 ? Model.summary(String(curlOut.text || "")) : null)) root.probeNext() }
+  }
+  Process {
+    id: activityCurl
+    stdout: StdioCollector { id: activityCurlOut; waitForEnd: true }
+    onExited: function(code) { root.recordActivityProbe(code === 0 ? Model.t3Activity(String(activityCurlOut.text || "")) : null); root.probeNext() }
   }
   Process { id: notify }
   Process { id: desktopCheck; onExited: function(code) { if (code !== 0) { Qt.openUrlExternally(root.pendingDashboardUrl); return }; hyprClients.command = ["hyprctl", "clients", "-j"]; hyprClients.running = true } }
@@ -213,15 +257,18 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): string { root.refresh(); return "ok" }
     function dashboard(): string { root.openDashboard(); return "ok" }
-    function status(): string { return root.nodes.length + " graves · " + root.reachableCount + " reachable" }
+    function status(): string {
+      var base = root.nodes.length + " graves · " + root.reachableCount + " reachable"
+      return base + " · " + root.fleetT3Feeds + " T3 feed" + (root.fleetT3Feeds === 1 ? "" : "s") + " · " + root.fleetT3Working + " working · " + root.fleetT3Attention + " need you"
+    }
   }
 
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    iconComponent: Component { GraveIcon { iconSize: Style.font.icon; fontFamily: root.fontFamily; color: root.nodes.length ? (root.warningCount > 0 ? root.urgent : root.foreground) : root.dim; badgeCount: root.warningCount; breathing: root.refreshing } }
-    tooltipText: root.nodes.length ? "Gravedecay · " + root.reachableCount + "/" + root.nodes.length + " reachable" + (root.warningCount ? " · " + root.warningCount + " restless" : " · buried, not broken") : (root.refreshing ? "Gravedecay · checking beneath the soil" : "Gravedecay · no graves found")
+    iconComponent: Component { GraveIcon { iconSize: Style.font.icon; fontFamily: root.fontFamily; color: root.nodes.length ? (root.warningCount > 0 || root.fleetT3Attention > 0 ? root.urgent : root.foreground) : root.dim; badgeCount: root.warningCount + root.fleetT3Attention; breathing: root.refreshing || root.fleetT3Working > 0 } }
+    tooltipText: root.nodes.length ? "Gravedecay · " + root.reachableCount + "/" + root.nodes.length + " reachable" + (root.warningCount ? " · " + root.warningCount + " restless" : "") + (root.fleetT3Working ? " · " + root.fleetT3Working + " T3 working" : "") + (root.fleetT3Attention ? " · " + root.fleetT3Attention + " need you" : "") + (!root.warningCount && !root.fleetT3Working && !root.fleetT3Attention ? " · buried, not broken" : "") : (root.refreshing ? "Gravedecay · checking beneath the soil" : "Gravedecay · no graves found")
     onPressed: function(code) { if (code === Qt.RightButton || code === Qt.MiddleButton) root.refresh(); else root.toggle() }
   }
 
@@ -266,7 +313,7 @@ Panel {
             detail: root.current ? Model.stateLabel(root.current) : ""
             foreground: root.stateColor
             fontFamily: root.fontFamily
-            iconComponent: Component { GraveIcon { iconSize: Style.font.display; fontFamily: root.fontFamily; color: root.stateColor; breathing: root.refreshing } }
+            iconComponent: Component { GraveIcon { iconSize: Style.font.display; fontFamily: root.fontFamily; color: root.stateColor; breathing: root.refreshing || root.currentT3Counts.working > 0 } }
             trailingControl: Component { PanelActionButton { iconText: "󰑐"; tooltipText: "Refresh graves"; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.refresh() } }
           }
 
@@ -294,10 +341,33 @@ Panel {
             PanelSectionHeader { text: "ACTIVITY & HEALTH"; foreground: root.foreground; fontFamily: root.fontFamily }
             GridLayout {
               width: parent.width; columns: 2; columnSpacing: Style.space(8); rowSpacing: Style.space(8)
-              StatCard { Layout.fillWidth: true; icon: "󰖟"; label: "Live sessions"; value: root.current ? String(root.current.summary.activity.sessions_live || 0) : "—" }
+              StatCard { Layout.fillWidth: true; icon: "󰖟"; label: "CLI sessions"; value: root.current ? String(root.current.summary.activity.sessions_live || 0) : "—" }
               StatCard { Layout.fillWidth: true; icon: "󰤄"; label: "Frozen"; value: root.current ? String(root.current.summary.activity.sessions_frozen || 0) : "—" }
+              StatCard { visible: root.currentT3Available; Layout.fillWidth: true; icon: "󰚩"; label: "T3 working"; value: String(root.currentT3Counts.working) }
+              StatCard { visible: root.currentT3Available; Layout.fillWidth: true; icon: "󰀦"; label: "Needs you"; value: String(root.currentT3Counts.attention); alarming: Number(value) > 0 }
               StatCard { Layout.fillWidth: true; icon: "󰒋"; label: "Failed services"; value: root.current ? String(root.current.summary.health.services_failed || 0) : "—"; alarming: Number(value) > 0 }
               StatCard { Layout.fillWidth: true; icon: "󰡨"; label: "Containers"; value: root.current ? String(root.current.summary.health.containers_problem || 0) : "—"; alarming: Number(value) > 0 }
+            }
+
+            Column {
+              visible: root.currentT3Available && root.actionableT3Threads().length > 0
+              width: parent.width
+              spacing: Style.space(6)
+              PanelSeparator { width: parent.width; foreground: root.foreground }
+              PanelSectionHeader { text: root.current && root.current.t3Activity && root.current.t3Activity.status === "stale" ? "T3 CHAT ACTIVITY · STALE" : "T3 CHAT ACTIVITY"; foreground: root.foreground; fontFamily: root.fontFamily }
+              Repeater {
+                model: root.actionableT3Threads()
+                delegate: Button {
+                  required property var modelData
+                  width: parent.width
+                  text: String(modelData.project || "project") + " · " + String(modelData.title || "thread") + " · " + String(modelData.phase || "").replace(/_/g, " ")
+                  iconText: modelData.phase === "waiting_approval" || modelData.phase === "waiting_input" ? "󰀦" : modelData.phase === "failed" ? "󰅙" : "󰚩"
+                  bordered: true
+                  foreground: modelData.phase === "failed" ? root.urgent : root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: root.openT3Thread(modelData)
+                }
+              }
             }
 
             PanelSeparator { width: parent.width; foreground: root.foreground }
@@ -310,14 +380,19 @@ Panel {
             }
             Text { width: parent.width; text: root.current ? (root.current.reachable ? "Observed " + Model.formatAge(root.current.summary.observed_at, root.nowMs) : "Last answered " + Model.formatAge(root.current.lastSeen, root.nowMs)) : ""; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; horizontalAlignment: Text.AlignRight }
 
-            PanelSeparator { width: parent.width; foreground: root.foreground }
-            PanelSectionHeader { text: "PASSAGEWAYS"; foreground: root.foreground; fontFamily: root.fontFamily }
-            RowLayout {
-              width: parent.width; spacing: Style.space(6)
-              Button { Layout.fillWidth: true; text: "Dashboard"; iconText: "󰖟"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.openDashboard() }
-              Button { visible: root.linkUrl("t3") !== ""; Layout.fillWidth: true; text: "T3"; iconText: "󰚩"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.openLink("t3") }
-              Button { visible: root.linkUrl("terminal") !== ""; Layout.fillWidth: true; text: "Terminal"; iconText: "󰆍"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.openLink("terminal") }
-              Button { visible: root.linkUrl("network") !== ""; Layout.fillWidth: true; text: "Network"; iconText: "󰛳"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.openLink("network") }
+            Column {
+              visible: root.hasPassageways()
+              width: parent.width
+              spacing: Style.space(10)
+              PanelSeparator { width: parent.width; foreground: root.foreground }
+              PanelSectionHeader { text: "PASSAGEWAYS"; foreground: root.foreground; fontFamily: root.fontFamily }
+              RowLayout {
+                width: parent.width; spacing: Style.space(6)
+                Button { visible: root.linkUrl("dashboard") !== ""; Layout.fillWidth: true; text: "Dashboard"; iconText: "󰖟"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.openDashboard() }
+                Button { visible: root.linkUrl("t3") !== ""; Layout.fillWidth: true; text: "T3"; iconText: "󰚩"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.openLink("t3") }
+                Button { visible: root.linkUrl("terminal") !== ""; Layout.fillWidth: true; text: "Terminal"; iconText: "󰆍"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.openLink("terminal") }
+                Button { visible: root.linkUrl("network") !== ""; Layout.fillWidth: true; text: "Network"; iconText: "󰛳"; bordered: true; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.openLink("network") }
+              }
             }
           }
 
